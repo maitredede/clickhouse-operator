@@ -170,8 +170,7 @@ var _ = Describe("ClickHouse controller", Label("clickhouse"), func() {
 				Image: v1.ContainerImage{Tag: ClickHouseUpdateVersion},
 			}}),
 			Entry("scale up to 3 replicas", 2, v1.ClickHouseClusterSpec{Replicas: ptr.To[int32](3)}),
-			// TODO Uncomment after correct replica deletion is implemented
-			// Entry("scale down to 2 replicas", 3, v1.ClickHouseClusterSpec{Replicas: ptr.To[int32](2)}),
+			Entry("scale down to 2 replicas", 3, v1.ClickHouseClusterSpec{Replicas: ptr.To[int32](2)}),
 		)
 	})
 
@@ -437,9 +436,18 @@ func WaitClickHouseUpdatedAndReady(cr *v1.ClickHouseCluster, timeout time.Durati
 	EventuallyWithOffset(1, func() bool {
 		var cluster v1.ClickHouseCluster
 		ExpectWithOffset(1, k8sClient.Get(ctx, cr.NamespacedName(), &cluster)).To(Succeed())
-		return cluster.Generation == cluster.Status.ObservedGeneration &&
-			cluster.Status.CurrentRevision == cluster.Status.UpdateRevision &&
-			cluster.Status.ReadyReplicas == cluster.Replicas()
+		if cluster.Generation != cluster.Status.ObservedGeneration ||
+			cluster.Status.CurrentRevision != cluster.Status.UpdateRevision ||
+			cluster.Status.ReadyReplicas != cluster.Replicas() {
+			return false
+		}
+		for _, cond := range cluster.Status.Conditions {
+			if cond.Status != metav1.ConditionTrue {
+				return false
+			}
+		}
+
+		return true
 	}, timeout).Should(BeTrue())
 	// Needed for replica deletion to not forward deleting pods.
 	By(fmt.Sprintf("waiting for cluster %s replicas count match", cr.Name))
@@ -475,6 +483,11 @@ func ClickHouseRWChecks(cr *v1.ClickHouseCluster, checksDone *int, auth ...click
 	chClient, err := utils.NewClickHouseClient(ctx, config, cr, auth...)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	defer chClient.Close()
+
+	if *checksDone == 0 {
+		By("creating test database")
+		Expect(chClient.CreateDatabase(ctx)).To(Succeed())
+	}
 
 	By("writing new test data")
 	ExpectWithOffset(1, chClient.CheckWrite(ctx, *checksDone)).To(Succeed())
